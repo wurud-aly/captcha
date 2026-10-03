@@ -1,26 +1,28 @@
 #!/usr/bin/env node
 /**
- * End-to-end browser tests (Playwright + Chromium).
+ * End-to-end tests in Chromium (Playwright), served under a sub-path exactly
+ * like GitHub Pages: /arabic-hybrid-captcha/
  *
- * The app is served under a sub-path (/arabic-hybrid-captcha/) exactly like a
- * GitHub Pages project site, then exercised in a real browser.
+ * Drag and drop is tested with a real mouse on desktop and with real touch
+ * events (Chrome DevTools Protocol) on an emulated phone.
  *
- *   npm install            # installs playwright (dev dependency)
- *   npx playwright install chromium
+ *   npm install && npx playwright install chromium
  *   npm run test:e2e
- *
- * Output: tests/e2e/output/report.json, screenshots and per-word renders.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { startServer } from '../../scripts/serve.mjs';
+import { splitLetters } from '../../src/scripts/challenge.js';
 
 const OUT = fileURLToPath(new URL('./output/', import.meta.url));
 mkdirSync(OUT, { recursive: true });
+const WORDS = JSON.parse(readFileSync(new URL('../../src/data/words.json', import.meta.url), 'utf8')).words;
 const BASE = '/arabic-hybrid-captcha/';
-const PORT = 8600 + Math.floor(Math.random() * 300);
+const PORT = 8700 + Math.floor(Math.random() * 200);
 const URL_ROOT = `http://localhost:${PORT}${BASE}`;
+const SUCCESS = 'تم التحقق بنجاح. أنت إنسان.';
+const ERROR = 'إجابة غير صحيحة. حاول مرة أخرى.';
 
 const results = [];
 async function check(name, fn) {
@@ -33,538 +35,327 @@ async function check(name, fn) {
     console.log(`  ✗ ${name}\n      ${err.message}`);
   }
 }
-const assert = (cond, msg) => {
-  if (!cond) throw new Error(msg);
+const assert = (c, m) => {
+  if (!c) throw new Error(m);
 };
 
 const server = await startServer({ port: PORT, base: BASE, quiet: true });
 const browser = await chromium.launch();
-const problems = { console: [], network: [] };
+const problems = [];
 
-// Pages driven by pixel-reading test helpers trigger Chrome's "willReadFrequently"
-// performance hint on the test's own canvases; that one message is ignored there.
-// The clean-session check below (strict) verifies the app emits no warnings at all.
-const TEST_READBACK_HINT = /willReadFrequently/;
-async function openPage({ width = 1400, height = 900, dsf = 1, query = 'debug', name = 'page', strict = false } = {}) {
-  const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: dsf });
-  page.on('console', (m) => {
-    if (m.type() !== 'error' && m.type() !== 'warning') return;
-    if (!strict && m.type() === 'warning' && TEST_READBACK_HINT.test(m.text())) return;
-    problems.console.push(`${name}: [${m.type()}] ${m.text()}`);
-  });
-  page.on('pageerror', (e) => problems.console.push(`${name}: [pageerror] ${e.message}`));
-  page.on('requestfailed', (r) => problems.network.push(`${name}: failed ${r.url()}`));
-  page.on('response', (r) => {
-    if (r.status() >= 400) problems.network.push(`${name}: HTTP ${r.status()} ${r.url()}`);
-  });
-  await page.goto(`${URL_ROOT}?${query}`);
-  await page.waitForSelector('html[data-ready="true"]', { timeout: 20000 });
+async function open({ mobile = false } = {}) {
+  const context = await browser.newContext(
+    mobile ? { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true } : { viewport: { width: 1366, height: 860 } },
+  );
+  const page = await context.newPage();
+  page.on('console', (m) => (m.type() === 'error' || m.type() === 'warning') && problems.push(`[${m.type()}] ${m.text()}`));
+  page.on('pageerror', (e) => problems.push(`[pageerror] ${e.message}`));
+  page.on('requestfailed', (r) => problems.push(`[failed] ${r.url()}`));
+  page.on('response', (r) => r.status() >= 400 && problems.push(`[HTTP ${r.status()}] ${r.url()}`));
+  await page.goto(URL_ROOT);
+  await page.waitForSelector('.tile');
+  await page.waitForTimeout(500); // entrance animation
   return page;
 }
 
-const settle = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+const order = (page) => page.$$eval('#tiles .tile', (els) => els.map((e) => e.dataset.letter));
+const state = (page) => page.$eval('#captcha', (e) => e.dataset.state);
+/** Identify the current word from its letters (the page never exposes it). */
+async function currentWord(page) {
+  const letters = (await order(page)).sort().join('');
+  const matches = WORDS.filter((w) => splitLetters(w).sort().join('') === letters);
+  assert(matches.length === 1, `tiles ${letters} match ${matches.length} words`);
+  return matches[0];
+}
+const rect = (page, i) => page.$eval(`#tiles .tile:nth-child(${i + 1})`, (e) => e.getBoundingClientRect().toJSON());
 
-const canvasHash = (page) =>
-  page.evaluate(async () => {
-    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-    const data = document.getElementById('captcha-canvas').toDataURL();
-    let h = 0;
-    for (let i = 0; i < data.length; i++) h = (Math.imul(31, h) + data.charCodeAt(i)) | 0;
-    return h;
-  });
-
-// ---------------------------------------------------------------- in-page helpers
-const HELPERS = () => {
-  window.__t = {
-    alpha(canvas) {
-      const ctx = canvas.getContext('2d');
-      const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-      const a = new Float32Array(canvas.width * canvas.height);
-      for (let i = 0; i < a.length; i++) a[i] = d[i * 4 + 3] / 255;
-      return a;
-    },
-    components(a, w, h, threshold = 0.15, minSize = 4) {
-      const seen = new Uint8Array(w * h);
-      let n = 0;
-      for (let i = 0; i < a.length; i++) {
-        if (seen[i] || a[i] <= threshold) continue;
-        let size = 0;
-        const stack = [i];
-        seen[i] = 1;
-        while (stack.length) {
-          const p = stack.pop();
-          size++;
-          const x = p % w;
-          const y = (p / w) | 0;
-          for (let dy = -1; dy <= 1; dy++)
-            for (let dx = -1; dx <= 1; dx++) {
-              const xx = x + dx;
-              const yy = y + dy;
-              if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
-              const q = yy * w + xx;
-              if (!seen[q] && a[q] > threshold) {
-                seen[q] = 1;
-                stack.push(q);
-              }
-            }
-        }
-        if (size >= minSize) n++;
-      }
-      return n;
-    },
-    ncc(a, b) {
-      let ma = 0;
-      let mb = 0;
-      for (let i = 0; i < a.length; i++) {
-        ma += a[i];
-        mb += b[i];
-      }
-      ma /= a.length;
-      mb /= b.length;
-      let num = 0;
-      let da = 0;
-      let db = 0;
-      for (let i = 0; i < a.length; i++) {
-        num += (a[i] - ma) * (b[i] - mb);
-        da += (a[i] - ma) ** 2;
-        db += (b[i] - mb) ** 2;
-      }
-      return num / Math.sqrt(da * db);
-    },
-  };
-};
-
-// ---------------------------------------------------------------- tests
-console.log(`\nServing ${URL_ROOT} (GitHub Pages style sub-path)\n`);
-const page = await openPage({ name: 'desktop', dsf: 2 });
-await page.evaluate(HELPERS);
-
-console.log('A. Assets');
-await check('all 12 handwritten images load at their recorded size', () =>
-  page.evaluate(() => {
-    const { engine } = window.__ahc;
-    const bad = engine.letters.all().filter((s) => {
-      const img = engine.imageFor(s.id);
-      return !img || img.naturalWidth !== s.image.width || img.naturalHeight !== s.image.height;
-    });
-    if (bad.length) throw new Error(`bad: ${bad.map((s) => s.id)}`);
-    return `${engine.letters.all().length} images`;
-  }),
-);
-await check('gallery images (original files) load', async () => {
-  const n = await page.$$eval('#gallery-grid img', async (imgs) => {
-    await Promise.all(imgs.map((i) => (i.complete ? null : i.decode().catch(() => null))));
-    return imgs.filter((i) => i.naturalWidth > 0).length;
-  });
-  assert(n === 12, `${n} gallery images loaded`);
-  return '12/12';
-});
-await check('Cairo Light loads from the local file and is used for typed letters', () =>
-  page.evaluate(() => {
-    const fam = window.__ahc.engine.composition.typed.fontFamily;
-    if (!document.fonts.check(`300 40px "${fam}"`, 'شبكات')) throw new Error('engine font not loaded');
-    if (!document.fonts.check(`300 16px "Cairo UI"`, 'ب')) throw new Error('UI font not loaded');
-    const c = document.createElement('canvas').getContext('2d');
-    c.font = `300 100px "${fam}"`;
-    const cairo = c.measureText('شبكات').width;
-    c.font = '300 100px serif';
-    const fallback = c.measureText('شبكات').width;
-    if (Math.abs(cairo - fallback) < 0.5) throw new Error('glyph widths equal to fallback font');
-    const faces = [...document.fonts].filter((f) => f.family.replace(/"/g, '') === fam && f.status === 'loaded');
-    if (!faces.length) throw new Error('FontFace not registered');
-    return `width Cairo ${cairo.toFixed(1)} vs fallback ${fallback.toFixed(1)}`;
-  }),
-);
-
-console.log('\nB/C. Rendering and word generation');
-const words = await page.evaluate(() => window.__ahc.engine.words.all().map((w) => ({ id: w.id, word: w.word, characters: w.characters })));
-for (const w of words) {
-  await page.click(`[data-word="${w.id}"]`);
-  await settle(page);
-
-  await check(`${w.word}: plan matches words.json (letters, forms, styles, samples)`, () =>
-    page.evaluate((w) => {
-      const plan = window.__ahc.app.last.plan;
-      if (plan.length !== w.characters.length) throw new Error('length mismatch');
-      plan.forEach((l, i) => {
-        const c = w.characters[i];
-        if (l.char !== c.char || l.form !== c.form || l.style !== c.style || (c.sample && l.sample?.id !== c.sample))
-          throw new Error(`letter ${i}: got ${l.char}/${l.form}/${l.style}/${l.sample?.id}`);
-      });
-      return plan.map((l) => `${l.char}:${l.style === 'handwritten' ? l.sample.id : 'typed'}`).join(' ');
-    }, w),
-  );
-
-  await check(`${w.word}: right-to-left ordering of letters on the canvas`, () =>
-    page.evaluate(() => {
-      const { pieces, layout, fit } = window.__ahc.app.last;
-      const cx = pieces.map((p, i) => fit.tx + (layout.placements[i].x + p.inkBox.x + p.inkBox.w / 2) * fit.scale);
-      for (let i = 1; i < cx.length; i++) if (!(cx[i] < cx[i - 1])) throw new Error(`letter ${i} not left of ${i - 1}`);
-      return `centres x: ${cx.map((v) => Math.round(v)).join(' > ')}`;
-    }),
-  );
-
-  await check(`${w.word}: connected letters meet exactly at their connection points`, () =>
-    page.evaluate(() => {
-      const { layout, k } = window.__ahc.app.last;
-      const s = window.__ahc.store.get();
-      for (const j of layout.joins) {
-        const dx = j.entry.x - j.exit.x - s.overlap * k;
-        const dy = j.entry.y - j.exit.y;
-        if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) throw new Error(`join ${j.from}->${j.to} off by ${dx}, ${dy}`);
-      }
-      return `${layout.joins.length} joins, ${layout.groups.length} groups`;
-    }),
-  );
-
-  await check(`${w.word}: no visible gap at any join (pixel check)`, () =>
-    page.evaluate(() => {
-      const { engine, store, app } = window.__ahc;
-      const c = document.createElement('canvas');
-      const r = engine.render(c, { wordId: app.wordId, settings: { ...store.get(), background: 'plain', showGuides: false }, seed: 1, dpr: 2, setAnswer: false });
-      const ctx = c.getContext('2d');
-      const out = [];
-      for (const j of r.layout.joins) {
-        const x = Math.round(r.fit.tx + ((j.exit.x + j.entry.x) / 2) * r.fit.scale);
-        const y = Math.round(r.fit.ty + ((j.exit.y + j.entry.y) / 2) * r.fit.scale);
-        const d = ctx.getImageData(x - 3, y - 3, 7, 7).data;
-        let darkest = 1;
-        for (let i = 0; i < d.length; i += 4) darkest = Math.min(darkest, (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) / 255);
-        if (darkest > 0.5) throw new Error(`gap at join ${j.from}->${j.to} (lightest-ink ${darkest.toFixed(2)})`);
-        out.push(darkest.toFixed(2));
-      }
-      return `ink luminance at joins: ${out.join(', ') || 'no joins'}`;
-    }),
-  );
-
-  await check(`${w.word}: handwritten letters keep all parts (dots), are not cropped or mirrored`, () =>
-    page.evaluate(() => {
-      const { engine, app } = window.__ahc;
-      const T = window.__t;
-      const report = [];
-      app.last.pieces.forEach((p, i) => {
-        if (p.kind !== 'handwritten') return;
-        const s = engine.letters.get(p.sampleId);
-        // components: original image vs processed piece
-        const img = engine.imageFor(s.id);
-        const oc = document.createElement('canvas');
-        oc.width = s.image.width;
-        oc.height = s.image.height;
-        oc.getContext('2d').drawImage(img, 0, 0);
-        const oa = T.alpha(oc);
-        const origParts = T.components(oa, oc.width, oc.height);
-        const pa = T.alpha(p.canvas);
-        const pieceParts = T.components(pa, p.canvas.width, p.canvas.height);
-        if (pieceParts !== origParts) throw new Error(`${s.id}: ${origParts} parts in original, ${pieceParts} rendered`);
-        // not cropped: ink never touches the raster edge
-        const b = p.inkBox;
-        if (b.x <= 0 || b.y <= 0 || b.x + b.w >= p.width || b.y + b.h >= p.height) throw new Error(`${s.id}: ink touches raster edge`);
-        // not mirrored: map the raster back to original pixels and correlate
-        // with the original image and with its horizontal mirror image
-        const back = document.createElement('canvas');
-        back.width = s.image.width;
-        back.height = s.image.height;
-        back.getContext('2d').drawImage(p.canvas, p.pad, p.pad, s.image.width * p.scale, s.image.height * p.scale, 0, 0, s.image.width, s.image.height);
-        const ba = T.alpha(back);
-        const mirrored = new Float32Array(oa.length);
-        for (let y = 0; y < oc.height; y++) for (let x = 0; x < oc.width; x++) mirrored[y * oc.width + x] = oa[y * oc.width + (oc.width - 1 - x)];
-        const same = T.ncc(ba, oa);
-        const flip = T.ncc(ba, mirrored);
-        if (!(same > 0.8 && same > flip + 0.2)) throw new Error(`${s.id}: correlation ${same.toFixed(2)} vs mirrored ${flip.toFixed(2)}`);
-        report.push(`${s.id}: ${pieceParts} part(s), ncc ${same.toFixed(2)} (mirror ${flip.toFixed(2)})`);
-      });
-      return report.join('; ') || 'no handwritten letters';
-    }),
-  );
-
-  await check(`${w.word}: stroke widths of typed and handwritten letters are consistent`, () =>
-    page.evaluate(() => {
-      const { pieces, k } = window.__ahc.app.last;
-      const hw = pieces.filter((p) => p.kind === 'handwritten').map((p) => p.strokeWidth / k);
-      const ty = pieces.filter((p) => p.kind === 'typed').map((p) => p.strokeWidth / k);
-      const all = [...hw, ...ty];
-      const ratio = Math.max(...all) / Math.min(...all);
-      if (ratio > 1.35) throw new Error(`stroke widths vary by ${ratio.toFixed(2)}×`);
-      return `handwritten ${hw.map((v) => v.toFixed(2)).join('/')} px, typed ${ty.map((v) => v.toFixed(2)).join('/')} px`;
-    }),
-  );
-
-  await check(`${w.word}: whole word fits the CAPTCHA frame without distortion`, () =>
-    page.evaluate(() => {
-      const { layout, fit } = window.__ahc.app.last;
-      const c = document.getElementById('captcha-canvas');
-      const x0 = fit.tx + layout.bounds.minX * fit.scale;
-      const x1 = fit.tx + layout.bounds.maxX * fit.scale;
-      const y0 = fit.ty + layout.bounds.minY * fit.scale;
-      const y1 = fit.ty + layout.bounds.maxY * fit.scale;
-      if (x0 < 0 || y0 < 0 || x1 > c.width || y1 > c.height) throw new Error('word exceeds canvas');
-      return `uniform scale ${fit.scale.toFixed(2)}, ink ${Math.round(x1 - x0)}×${Math.round(y1 - y0)} px of ${c.width}×${c.height}`;
-    }),
-  );
-
-  await check(`${w.word}: baseline alignment of connected groups`, () =>
-    page.evaluate(() => {
-      const { pieces, layout, k } = window.__ahc.app.last;
-      return layout.groups
-        .map((g) => {
-          const dev = g.map((i) => (layout.placements[i].y + pieces[i].baseline) / k);
-          const mean = dev.reduce((a, b) => a + b, 0) / dev.length;
-          if (Math.abs(mean) > 0.01 && g.length > 1) throw new Error('group mean baseline not on shared baseline');
-          return `[${dev.map((d) => d.toFixed(1)).join(', ')}]`;
-        })
-        .join(' ');
-    }),
-  );
-
-  await check(`${w.word}: regenerate 5× (non-blank, background changes, letters unchanged)`, async () => {
-    const hashes = [];
-    for (let i = 0; i < 5; i++) {
-      await page.click('#refresh-btn');
-      hashes.push(await canvasHash(page));
-      const ok = await page.evaluate(() => {
-        const c = document.getElementById('captcha-canvas');
-        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-        let dark = 0;
-        for (let i = 0; i < d.length; i += 4) if (d[i] < 90 && d[i + 1] < 90) dark++;
-        return dark;
-      });
-      assert(ok > 500, `render ${i} looks blank (${ok} ink pixels)`);
-    }
-    assert(new Set(hashes).size === 5, 'refresh did not change the image');
-    const same = await page.evaluate(() => {
-      const { engine, store, app } = window.__ahc;
-      const a = document.createElement('canvas');
-      const b = document.createElement('canvas');
-      engine.render(a, { wordId: app.wordId, settings: store.get(), seed: 42, dpr: 2, setAnswer: false });
-      engine.render(b, { wordId: app.wordId, settings: store.get(), seed: 42, dpr: 2, setAnswer: false });
-      return a.toDataURL() === b.toDataURL();
-    });
-    assert(same, 'same seed did not reproduce the same image');
-    return '5 distinct images, same seed reproducible';
-  });
-
-  // save renders for visual inspection
-  for (const guides of [false, true]) {
-    const png = await page.evaluate((guides) => {
-      const { engine, store, app } = window.__ahc;
-      const c = document.createElement('canvas');
-      engine.render(c, { wordId: app.wordId, settings: { ...store.get(), showGuides: guides }, seed: 7, dpr: 2, setAnswer: false });
-      return c.toDataURL('image/png').split(',')[1];
-    }, guides);
-    writeFileSync(`${OUT}render-${w.id}${guides ? '-guides' : ''}.png`, Buffer.from(png, 'base64'));
-  }
+/** Drag the tile at index `from` so it lands in front of (to the right of, in RTL) the tile at index `to`. */
+async function mouseDrag(page, from, to) {
+  const a = await rect(page, from);
+  const b = await rect(page, to);
+  await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+  await page.mouse.down();
+  const tx = b.x + b.width - 6;
+  const ty = b.y + b.height / 2;
+  const steps = 14;
+  for (let s = 1; s <= steps; s++) await page.mouse.move(a.x + a.width / 2 + ((tx - a.x - a.width / 2) * s) / steps, a.y + a.height / 2 + ((ty - a.y - a.height / 2) * s) / steps);
+  await page.waitForTimeout(80);
+  await page.mouse.up();
+  await page.waitForTimeout(260);
 }
 
-console.log('\nD. Interface');
-await check('verification: correct, wrong, empty and normalised answers', async () => {
-  await page.click('[data-word="shabakat"]');
-  const attempt = async (text) => {
-    await page.fill('#answer-input', text);
-    await page.click('#answer-form button[type="submit"]');
-    return page.$eval('#status', (e) => e.className);
-  };
-  assert((await attempt('شبكات')).includes('status--success'), 'correct answer rejected');
-  assert((await attempt('شبكة')).includes('status--error'), 'wrong answer accepted');
-  assert((await attempt('')).includes('status--error'), 'empty answer accepted');
-  assert((await attempt(' شَبكـات ')).includes('status--success'), 'diacritics/tatweel/space not normalised');
-  return 'success / error / error / success';
-});
-await check('random mode: hidden word can be solved, answer not exposed beside the image', async () => {
-  await page.click('[data-word="random"]');
-  await page.click('#refresh-btn');
-  const word = await page.evaluate(() => window.__ahc.engine.words.get(window.__ahc.app.wordId).word);
-  const exposed = await page.evaluate((word) => {
-    const stage = document.querySelector('.generator');
-    const clone = stage.cloneNode(true);
-    clone.querySelector('.word-picker').remove(); // the picker lists all words by design
-    return clone.innerHTML.includes(word) || document.getElementById('captcha-canvas').getAttribute('aria-label').includes(word);
-  }, word);
-  assert(!exposed, 'answer text found in the generator markup');
-  const lettersLocked = await page.$eval('#letters-root', (e) => !!e.querySelector('.letters-locked') && !e.querySelector('.letter-chip'));
-  assert(lettersLocked, 'letter editor reveals the hidden word');
-  await page.fill('#answer-input', word);
-  await page.click('#answer-form button[type="submit"]');
-  assert((await page.$eval('#status', (e) => e.className)).includes('success'), 'random word not verified');
-  return `solved a hidden "${word}"`;
-});
-await check('word selection switches the rendered word', async () => {
-  const seen = [];
-  for (const w of words) {
-    await page.click(`[data-word="${w.id}"]`);
-    await page.waitForTimeout(80);
-    seen.push(await page.evaluate(() => window.__ahc.app.last.plan.map((l) => l.char).join('')));
-    assert((await page.getAttribute(`[data-word="${w.id}"]`, 'aria-checked')) === 'true', 'picker state');
+/** Same gesture with real touch events (touchstart/move/end through CDP). */
+async function touchDrag(page, cdp, from, to) {
+  const a = await rect(page, from);
+  const b = await rect(page, to);
+  const sx = a.x + a.width / 2;
+  const sy = a.y + a.height / 2;
+  const tx = b.x + b.width - 5;
+  const ty = b.y + b.height / 2;
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: sx, y: sy }] });
+  const steps = 14;
+  for (let s = 1; s <= steps; s++) {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: sx + ((tx - sx) * s) / steps, y: sy + ((ty - sy) * s) / steps }] });
+    await page.waitForTimeout(16);
   }
-  assert(seen.join('|') === words.map((w) => w.word).join('|'), seen.join('|'));
-  return seen.join(', ');
-});
-await check('every settings control changes the CAPTCHA preview', async () => {
-  await page.click('[data-word="shabakat"]');
-  const ids = await page.$$eval('#settings-root input[type=range], #settings-root select', (els) => els.map((e) => e.id));
-  const changed = [];
-  for (const id of ids) {
-    const before = await canvasHash(page);
-    await page.evaluate((id) => {
-      const el = document.getElementById(id);
-      if (el.tagName === 'SELECT') {
-        el.selectedIndex = (el.selectedIndex + 1) % el.options.length;
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      } else {
-        const v = Number(el.value);
-        const max = Number(el.max);
-        const min = Number(el.min);
-        el.value = String(v + (max - v > (max - min) / 4 ? (max - min) / 4 : -(max - min) / 4));
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-    }, id);
-    const after = await canvasHash(page);
-    assert(before !== after, `${id} did not change the image`);
-    changed.push(id.replace('set-', ''));
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await page.waitForTimeout(260);
+}
+
+/** Put the letters in the right order, one drag per misplaced position. */
+async function solve(page, drag) {
+  const answer = splitLetters(await currentWord(page));
+  let moves = 0;
+  for (let i = 0; i < answer.length; i++) {
+    const cur = await order(page);
+    if (cur[i] === answer[i]) continue;
+    const from = cur.findIndex((l, j) => j > i && l === answer[i]);
+    await drag(from, i);
+    moves++;
+    const after = await order(page);
+    assert(after[i] === answer[i], `drag ${from}→${i} did not place ${answer[i]}: ${after.join('')}`);
   }
-  await page.click('#reset-all');
-  return changed.join(', ');
+  return moves;
+}
+
+console.log(`\nServing ${URL_ROOT} (GitHub Pages style sub-path)\n`);
+
+// ------------------------------------------------------------------ desktop
+console.log('Desktop (mouse)');
+let page = await open();
+await page.screenshot({ path: `${OUT}desktop-initial.png` });
+
+await check('only the CAPTCHA is shown: no navigation, settings, admin or other UI', async () => {
+  const info = await page.evaluate(() => ({
+    links: document.querySelectorAll('a').length,
+    navs: document.querySelectorAll('nav, aside, header:not(.captcha__head), footer, dialog, select, input, iframe').length,
+    buttons: [...document.querySelectorAll('button')].filter((b) => !b.classList.contains('tile')).map((b) => b.id),
+    visibleOutsideCard: [...document.body.querySelectorAll('*')].filter((e) => !e.closest('#captcha') && !['MAIN', 'SCRIPT'].includes(e.tagName) && e.getBoundingClientRect().width > 0).length,
+    text: document.body.innerText.replace(/\s+/g, ' ').trim(),
+  }));
+  assert(info.links === 0 && info.navs === 0, JSON.stringify(info));
+  assert(info.buttons.join() === 'new-challenge,verify', info.buttons.join());
+  assert(info.visibleOutsideCard === 0, 'content outside the CAPTCHA card');
+  const body = await page.evaluate(() => document.body.innerHTML);
+  const term = body.match(/admin|setting|gallery|debug|experiment|font-size|customi[sz]/i);
+  assert(!term, `old UI term in the page: ${term}`);
+  return info.text;
 });
-await check('guides toggle shows construction overlay and legend', async () => {
-  const before = await canvasHash(page);
-  await page.click('.stage-meta .switch');
-  const after = await canvasHash(page);
-  const legend = await page.$eval('#legend', (e) => !e.hidden);
-  await page.screenshot({ path: `${OUT}desktop-guides.png` });
-  await page.click('.stage-meta .switch');
-  assert(before !== after && legend, 'guides not shown');
-  return 'overlay + legend';
-});
-await check('per-letter character type, sample and scale controls', async () => {
-  await page.click('[data-word="shabakat"]');
-  await page.click('.letter-chip[data-index="1"]'); // medial ب
-  await page.click('#letters-root .segmented button[data-style="handwritten"]');
-  await settle(page);
-  const b = await page.evaluate(() => window.__ahc.app.last.plan[1]);
-  assert(b.style === 'handwritten' && b.sample.id === 'hw-06', 'ب not switched to hw-06');
-  await page.click('.letter-chip[data-index="2"]'); // medial ك: no identified sample
-  const disabled = await page.$eval('#letters-root .segmented button[data-style="handwritten"]', (e) => e.disabled);
-  assert(disabled, 'handwritten allowed for ك without a sample');
-  await page.click('.letter-chip[data-index="3"]'); // final ا: two samples
-  const opts = await page.$$eval('#set-letter-sample option', (o) => o.map((x) => x.value));
-  assert(opts.join() === 'hw-03,hw-12', `alif samples: ${opts}`);
-  await page.selectOption('#set-letter-sample', 'hw-03');
-  await settle(page);
-  const a = await page.evaluate(() => window.__ahc.app.last.plan[3].sample.id);
-  assert(a === 'hw-03', 'sample switch failed');
-  const before = await canvasHash(page);
-  await page.evaluate(() => {
-    const el = document.getElementById('set-scale');
-    el.value = '1.3';
-    el.dispatchEvent(new Event('input', { bubbles: true }));
+await check('Arabic RTL page, card centred on screen', async () => {
+  const r = await page.evaluate(() => {
+    const c = document.getElementById('captcha').getBoundingClientRect();
+    return { dir: document.documentElement.dir, lang: document.documentElement.lang, dx: c.left + c.width / 2 - innerWidth / 2, dy: c.top + c.height / 2 - innerHeight / 2 };
   });
-  assert(before !== (await canvasHash(page)), 'letter scale had no effect');
-  await page.screenshot({ path: `${OUT}desktop-letter-edit.png`, fullPage: true });
-  await page.click('.letter-reset');
-  return 'ب → hw-06, ك typed-only, ا sample hw-03, scale 1.3';
+  assert(r.dir === 'rtl' && r.lang === 'ar', `${r.dir} ${r.lang}`);
+  assert(Math.abs(r.dx) < 2 && Math.abs(r.dy) < 2, `off-centre by ${r.dx}, ${r.dy}`);
+  return 'centred horizontally and vertically';
 });
-await check('stroke matching button aligns typed and handwritten stroke widths', async () => {
-  await page.click('#match-stroke');
-  await page.waitForTimeout(400);
-  const m = await page.evaluate(() => window.__ahc.engine.measureStrokes(window.__ahc.store.get()));
-  assert(Math.abs(m.typed - m.hand) / m.hand < 0.06, `hand ${m.hand} typed ${m.typed}`);
-  const v = await page.evaluate(() => window.__ahc.store.get().typedStroke);
-  await page.click('#reset-all');
-  return `handwritten ${m.hand.toFixed(2)} px, typed ${m.typed.toFixed(2)} px (typed stroke ${v})`;
+await check('tiles show exactly the letters of one word from the list, scrambled', async () => {
+  const word = await currentWord(page);
+  const tiles = await order(page);
+  assert(tiles.length === splitLetters(word).length, 'extra or missing letters');
+  assert(tiles.join('') !== splitLetters(word).join(''), 'shown in the correct order');
+  return `${tiles.length} tiles, scrambled`;
 });
-await check('gallery: 12 items with label, type and dimensions; preview opens and closes', async () => {
-  const tiles = await page.$$eval('.tile', (t) => t.map((x) => x.innerText));
-  assert(tiles.length === 12, `${tiles.length} tiles`);
-  for (const text of tiles) assert(/\d+ × \d+ px/.test(text) && /Handwritten/.test(text), `tile text: ${text}`);
-  await page.click('.tile[data-sample="hw-08"]');
-  await page.waitForSelector('#preview-dialog[open]');
-  const details = await page.$eval('#preview-content', (e) => e.innerText);
-  assert(details.includes('ف') && details.includes('170 × 170'), 'details missing');
-  await page.screenshot({ path: `${OUT}desktop-preview.png` });
-  await page.click('#preview-close');
-  assert(!(await page.$('#preview-dialog[open]')), 'dialog did not close');
-  return `${tiles.filter((t) => t.includes('Unknown')).length} marked unknown`;
+await check('the answer is not revealed in the page or in global variables', async () => {
+  const word = await currentWord(page);
+  const leaks = await page.evaluate((w) => {
+    const found = [];
+    if (document.documentElement.outerHTML.includes(w)) found.push('DOM');
+    for (const k of Object.getOwnPropertyNames(window)) {
+      try {
+        const v = window[k];
+        if (v === w || (typeof v === 'string' && v.includes(w))) found.push(k);
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      if (Object.values(localStorage).some((v) => v.includes(w))) found.push('localStorage');
+    } catch {
+      /* ignore */
+    }
+    return found;
+  }, word);
+  assert(!leaks.length, `answer found in: ${leaks.join(', ')}`);
+  return 'not in DOM, globals or storage';
 });
-await check('desktop layout has no horizontal overflow', async () => {
-  const o = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-  await page.click('[data-word="fahd"]');
-  await page.screenshot({ path: `${OUT}desktop.png`, fullPage: true });
-  assert(o <= 0, `overflow ${o}px`);
-  return '1400×900';
+await check('Verify with the wrong order shows the error and keeps the letters movable', async () => {
+  await page.click('#verify');
+  await page.waitForTimeout(450);
+  assert((await state(page)) === 'error', 'no error state');
+  assert((await page.textContent('#result-text')) === ERROR, await page.textContent('#result-text'));
+  assert(await page.$eval('.result__cross', (e) => getComputedStyle(e).display !== 'none'), 'no error icon');
+  await page.screenshot({ path: `${OUT}desktop-error.png` });
+  return ERROR;
+});
+await check('mouse drag and drop reorders tiles (other tiles slide aside)', async () => {
+  const before = await order(page);
+  const a = await rect(page, before.length - 1);
+  const b = await rect(page, 0);
+  await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+  await page.mouse.down();
+  for (let s = 1; s <= 10; s++) await page.mouse.move(a.x + a.width / 2 + (b.x + b.width - 6 - a.x - a.width / 2) * (s / 10), a.y + a.height / 2 - 6 * Math.sin((s / 10) * Math.PI));
+  const lifted = await page.$eval('.tile.is-dragging', (e) => getComputedStyle(e).transform !== 'none').catch(() => false);
+  await page.screenshot({ path: `${OUT}desktop-dragging.png` });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const after = await order(page);
+  assert(lifted, 'tile did not follow the pointer');
+  assert(after[0] === before[before.length - 1], `${before.join('')} → ${after.join('')}`);
+  assert((await state(page)) === 'ready', 'error message should clear after moving a letter');
+  return `${before.join(' ')} → ${after.join(' ')}`;
+});
+await check('arrange the correct word with the mouse → green check and success message', async () => {
+  await page.click('#new-challenge'); // fresh scramble, so at least one drag is needed
+  await page.waitForTimeout(500);
+  const moves = await solve(page, (f, t) => mouseDrag(page, f, t));
+  assert(moves > 0, 'nothing to drag');
+  await page.click('#verify');
+  await page.waitForTimeout(900);
+  assert((await state(page)) === 'success', 'no success state');
+  assert((await page.textContent('#result-text')) === SUCCESS, await page.textContent('#result-text'));
+  const check = await page.$eval('.result__check', (e) => ({ display: getComputedStyle(e).display, stroke: getComputedStyle(e).stroke }));
+  assert(check.display === 'block' && check.stroke === 'rgb(21, 128, 61)', JSON.stringify(check));
+  await page.screenshot({ path: `${OUT}desktop-success.png` });
+  return `${moves} drag(s); ${SUCCESS}`;
+});
+await check('after success the letters are locked', async () => {
+  const before = await order(page);
+  await mouseDrag(page, 0, before.length - 1);
+  assert((await order(page)).join('') === before.join(''), 'tiles still movable');
+  return 'locked';
+});
+await check('tap one letter then another to swap them (alternative to dragging)', async () => {
+  await page.click('#new-challenge');
+  await page.waitForTimeout(500);
+  const before = await order(page);
+  await page.click('#tiles .tile:nth-child(1)');
+  await page.click(`#tiles .tile:nth-child(${before.length})`);
+  await page.waitForTimeout(250);
+  const after = await order(page);
+  assert(after[0] === before[before.length - 1] && after[before.length - 1] === before[0], `${before.join('')} → ${after.join('')}`);
+  return `${before.join(' ')} → ${after.join(' ')}`;
+});
+await check('keyboard: arrow keys move the focused letter', async () => {
+  const before = await order(page);
+  await page.focus('#tiles .tile:nth-child(1)');
+  await page.keyboard.press('ArrowLeft'); // RTL: left = later in the word
+  await page.waitForTimeout(250);
+  const after = await order(page);
+  assert(after[1] === before[0] && after[0] === before[1], `${before.join('')} → ${after.join('')}`);
+  const focused = await page.evaluate(() => document.activeElement.dataset.letter);
+  assert(focused === before[0], 'focus lost');
+  return 'ArrowLeft moved the letter one place';
 });
 await page.close();
 
-const mobile = await openPage({ width: 390, height: 844, dsf: 2, name: 'mobile' });
-await check('mobile layout (390 px): no horizontal overflow, controls usable', async () => {
-  const o = await mobile.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-  assert(o <= 0, `overflow ${o}px`);
-  await mobile.click('[data-word="hasib"]');
-  await mobile.fill('#answer-input', 'حاسب');
-  await mobile.click('#answer-form button[type="submit"]');
-  assert((await mobile.$eval('#status', (e) => e.className)).includes('success'), 'verify failed on mobile');
-  const chipsOneRow = await mobile.$$eval('.letter-chip', (c) => new Set(c.map((x) => Math.round(x.getBoundingClientRect().top))).size === 1);
-  await mobile.screenshot({ path: `${OUT}mobile.png`, fullPage: true });
-  return chipsOneRow ? 'letter chips on one row' : 'letter chips wrap';
-});
-await mobile.close();
-
-const ar = await openPage({ name: 'arabic', query: 'debug&lang=ar' });
-await check('Arabic interface switches to RTL', async () => {
-  const dir = await ar.evaluate(() => [document.documentElement.dir, document.documentElement.lang]);
-  assert(dir[0] === 'rtl' && dir[1] === 'ar', dir.join());
-  await ar.click('[data-word="shabakat"]');
-  const order = await ar.$$eval('.letter-chip', (c) => c.map((x) => [x.dataset.index, x.getBoundingClientRect().left]));
-  assert(order.every((x, i) => i === 0 || x[1] < order[i - 1][1]), 'letter chips not right-to-left');
-  await ar.screenshot({ path: `${OUT}arabic.png`, fullPage: true });
-  await ar.click('#lang-toggle');
-  const back = await ar.evaluate(() => document.documentElement.dir);
-  assert(back === 'ltr', 'toggle back failed');
-  return 'dir=rtl, chips right-to-left, toggles back to ltr';
-});
-await ar.close();
-
-const clean = await openPage({ name: 'clean-session', query: '', strict: true });
-await check('clean session: normal use through the UI only (words, refresh, settings, letters, gallery, language)', async () => {
-  for (const w of words) {
-    await clean.click(`[data-word="${w.id}"]`);
-    await clean.click('#refresh-btn');
-    await clean.click('.letter-chip[data-index="1"]');
+await check('every page load is a new challenge; the previous word is never repeated', async () => {
+  const p = await open();
+  const seq = [];
+  for (let i = 0; i < 15; i++) {
+    const w = await currentWord(p);
+    const tiles = await order(p);
+    assert(tiles.join('') !== splitLetters(w).join(''), `load ${i}: shown already solved`);
+    seq.push(w);
+    await p.reload();
+    await p.waitForSelector('.tile');
   }
-  await clean.click('#letters-root .segmented button[data-style="typed"]');
-  await clean.fill('#set-overlap', '4');
-  await clean.selectOption('#set-background', 'ruled');
-  await clean.click('#match-stroke');
-  await clean.click('.stage-meta .switch');
-  await clean.click('.tile[data-sample="hw-01"]');
-  await clean.click('#preview-close');
-  await clean.click('#lang-toggle');
-  await clean.click('[data-word="random"]');
-  await clean.fill('#answer-input', 'خطأ');
-  await clean.click('#answer-form button[type="submit"]');
-  await clean.waitForTimeout(600);
-  return 'completed without page errors';
+  await p.close();
+  for (let i = 1; i < seq.length; i++) assert(seq[i] !== seq[i - 1], `repeated ${seq[i]} at load ${i}`);
+  assert(new Set(seq).size === WORDS.length, `only saw ${[...new Set(seq)].join(', ')}`);
+  return seq.join(' → ');
 });
-await clean.close();
+await check('“new challenge” button also changes the word and scrambles again', async () => {
+  const p = await open();
+  const seen = [await currentWord(p)];
+  for (let i = 0; i < 6; i++) {
+    await p.click('#new-challenge');
+    await p.waitForTimeout(150);
+    seen.push(await currentWord(p));
+    assert(seen.at(-1) !== seen.at(-2), 'same word twice');
+    assert((await state(p)) === 'ready', 'state not reset');
+  }
+  await p.close();
+  return seen.join(' → ');
+});
 
-console.log('\nE. Deployment');
-await check('sub-path deployment: every request resolved (no 404s or failed loads)', () => {
-  if (problems.network.length) throw new Error(problems.network.join('\n      '));
+// ------------------------------------------------------------------ mobile
+console.log('\nMobile (touch)');
+page = await open({ mobile: true });
+const cdp = await page.context().newCDPSession(page);
+await check('mobile layout: fits 390 px, no horizontal scroll, tiles large enough to touch', async () => {
+  const r = await page.evaluate(() => {
+    let worst = 0;
+    for (const el of document.body.querySelectorAll('*')) {
+      const b = el.getBoundingClientRect();
+      if (b.width) worst = Math.max(worst, -b.left, b.right - innerWidth);
+    }
+    const t = document.querySelector('.tile').getBoundingClientRect();
+    return { worst, scroll: document.documentElement.scrollWidth - innerWidth, tile: [t.width, t.height] };
+  });
+  assert(r.worst <= 0 && r.scroll <= 0, `overflow ${r.worst}px`);
+  assert(r.tile[0] >= 44 && r.tile[1] >= 44, `tile ${r.tile}`);
+  await page.screenshot({ path: `${OUT}mobile-initial.png` });
+  return `tile ${Math.round(r.tile[0])}×${Math.round(r.tile[1])} px`;
+});
+await check('touch drag reorders tiles without scrolling the page', async () => {
+  const before = await order(page);
+  await touchDrag(page, cdp, before.length - 1, 0);
+  const after = await order(page);
+  const scrolled = await page.evaluate(() => scrollY);
+  assert(after[0] === before[before.length - 1], `${before.join('')} → ${after.join('')}`);
+  assert(scrolled === 0, `page scrolled ${scrolled}px`);
+  return `${before.join(' ')} → ${after.join(' ')}`;
+});
+await check('wrong answer on mobile → error; solve by touch → success', async () => {
+  const word = await currentWord(page);
+  if ((await order(page)).join('') !== splitLetters(word).join('')) {
+    await page.tap('#verify');
+    await page.waitForTimeout(450);
+    assert((await page.textContent('#result-text')) === ERROR, 'no error message');
+    await page.screenshot({ path: `${OUT}mobile-error.png` });
+  }
+  const moves = await solve(page, (f, t) => touchDrag(page, cdp, f, t));
+  await page.tap('#verify');
+  await page.waitForTimeout(900);
+  assert((await state(page)) === 'success', 'no success');
+  assert((await page.textContent('#result-text')) === SUCCESS, 'wrong message');
+  await page.screenshot({ path: `${OUT}mobile-success.png` });
+  return `${word}: ${moves} touch drag(s)`;
+});
+await check('tap-to-swap works with touch', async () => {
+  await page.tap('#new-challenge');
+  await page.waitForTimeout(500);
+  const before = await order(page);
+  await page.tap('#tiles .tile:nth-child(1)');
+  await page.tap('#tiles .tile:nth-child(2)');
+  await page.waitForTimeout(250);
+  const after = await order(page);
+  assert(after[0] === before[1] && after[1] === before[0], `${before.join('')} → ${after.join('')}`);
+  return `${before.join(' ')} → ${after.join(' ')}`;
+});
+await page.close();
+
+// ------------------------------------------------------------------ deployment
+console.log('\nDeployment');
+await check('works under the GitHub Pages sub-path: no 404s, failed requests or console errors', () => {
+  if (problems.length) throw new Error(problems.join('\n      '));
   return `served from ${BASE}`;
 });
-await check('no JavaScript errors or console warnings', () => {
-  if (problems.console.length) throw new Error(problems.console.join('\n      '));
-  return 'console clean';
-});
-await check('debug hook is absent without ?debug', async () => {
-  const p = await openPage({ query: '', name: 'nodebug' });
-  const hook = await p.evaluate(() => typeof window.__ahc);
+await check('font loads from the local file', async () => {
+  const p = await open();
+  const ok = await p.evaluate(async () => {
+    await document.fonts.ready;
+    return document.fonts.check('300 32px Cairo', 'ب');
+  });
   await p.close();
-  assert(hook === 'undefined', 'debug hook exposed');
-  return 'window.__ahc undefined';
+  assert(ok, 'Cairo not loaded');
+  return 'Cairo Light';
 });
 
 await browser.close();
 server.close();
-
 const failed = results.filter((r) => r.status === 'fail');
 writeFileSync(`${OUT}report.json`, JSON.stringify({ date: new Date().toISOString(), base: BASE, results }, null, 2));
 console.log(`\n${results.length - failed.length} passed, ${failed.length} failed. Report: tests/e2e/output/report.json\n`);
