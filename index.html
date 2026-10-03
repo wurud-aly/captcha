@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Arabic Hybrid CAPTCHA</title>
+  <meta name="description" content="An experimental research prototype for generating hybrid Arabic CAPTCHA images using handwritten and digitally typed characters.">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0f1724">
+  <link rel="icon" href="public/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="public/assets/fonts/Cairo-Light.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="stylesheet" href="src/styles/main.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="masthead">
+      <div class="masthead__text">
+        <h1 class="masthead__title" lang="en" dir="ltr">Arabic Hybrid CAPTCHA</h1>
+        <p class="masthead__subtitle" data-i18n="subtitle">An experimental research prototype for generating hybrid Arabic CAPTCHA images using handwritten and digitally typed characters.</p>
+      </div>
+      <p class="masthead__wordmark" lang="ar" dir="rtl" aria-hidden="true">كابتشا عربية هجينة</p>
+      <button class="lang-toggle" id="lang-toggle" type="button" data-i18n="langSwitch">العربية</button>
+    </header>
+
+    <main class="workbench">
+      <div class="workbench__main">
+      <section class="panel generator" aria-labelledby="generator-title">
+        <div class="generator__head">
+          <h2 id="generator-title" class="panel__title" data-i18n="generatorTitle">CAPTCHA</h2>
+          <div class="word-picker" role="radiogroup" aria-labelledby="word-label">
+            <span id="word-label" class="visually-hidden" data-i18n="wordLabel">Word</span>
+            <!-- word options are created by app.js from words.json -->
+          </div>
+        </div>
+
+        <div class="stage">
+          <canvas id="captcha-canvas" class="stage__canvas" width="1280" height="440" role="img"
+                  data-i18n-attr="aria-label:captchaAlt" aria-label="CAPTCHA image. Type the Arabic word you see."></canvas>
+          <div class="stage__loading" id="stage-loading" data-i18n="loading">Loading font and letter images…</div>
+          <div class="stage__tools">
+            <button class="icon-btn" id="refresh-btn" type="button" data-i18n-attr="aria-label:newCaptcha;title:newCaptcha" aria-label="New CAPTCHA" title="New CAPTCHA">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button class="icon-btn" id="download-btn" type="button" data-i18n-attr="aria-label:download;title:download" aria-label="Download PNG" title="Download PNG">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="stage-meta">
+          <label class="switch" data-i18n-attr="title:guidesHint" title="Show baseline, connection points and letter boxes">
+            <input type="checkbox" id="guides-toggle">
+            <span class="switch__track" aria-hidden="true"></span>
+            <span data-i18n="guides">Guides</span>
+          </label>
+          <ul class="legend" id="legend" hidden>
+            <li><span class="swatch swatch--hand"></span><span data-i18n="legendHand">Handwritten</span></li>
+            <li><span class="swatch swatch--typed"></span><span data-i18n="legendTyped">Typed (Cairo Light)</span></li>
+            <li><span class="dot dot--entry"></span><span data-i18n="legendEntry">Entry point</span></li>
+            <li><span class="dot dot--exit"></span><span data-i18n="legendExit">Exit point</span></li>
+          </ul>
+          <p class="stage-meta__hint" id="random-hint" data-i18n="randomHint">Random mode hides the word: type what you read.</p>
+        </div>
+
+        <form class="answer" id="answer-form" autocomplete="off" novalidate>
+          <label class="visually-hidden" for="answer-input" data-i18n="answerLabel">Your answer</label>
+          <input class="answer__input" id="answer-input" name="answer" type="text" lang="ar" dir="rtl"
+                 inputmode="text" spellcheck="false" autocapitalize="off"
+                 data-i18n-attr="placeholder:answerPlaceholder" placeholder="اكتب الكلمة هنا">
+          <button class="btn btn--primary" type="submit" data-i18n="verify">Verify</button>
+        </form>
+        <p class="status" id="status" role="status" aria-live="polite"></p>
+        <p class="warnings" id="warnings" hidden></p>
+      </section>
+
+      <section class="panel letters" aria-labelledby="letters-title">
+        <div class="letters__head">
+          <h2 id="letters-title" class="panel__title" data-i18n="groupLetters">Letters</h2>
+          <p class="letters__sub" data-i18n="lettersSub">Choose how each letter is written and fine-tune its position.</p>
+        </div>
+        <div id="letters-root"><!-- built by ui/settings-panel.js --></div>
+      </section>
+      </div>
+
+      <aside class="panel settings" aria-labelledby="settings-title">
+        <h2 id="settings-title" class="panel__title" data-i18n="settingsTitle">Experiment settings</h2>
+        <div id="settings-root"><!-- built by ui/settings-panel.js --></div>
+      </aside>
+    </main>
+
+    <section class="gallery" aria-labelledby="gallery-title">
+      <div class="gallery__head">
+        <h2 id="gallery-title" class="section-title" data-i18n="galleryTitle">Handwritten characters</h2>
+        <p class="gallery__intro" data-i18n="galleryIntro">The 12 original letter images.</p>
+      </div>
+      <ul class="gallery__grid" id="gallery-grid"><!-- built by ui/gallery.js --></ul>
+    </section>
+
+    <footer class="footer">
+      <p data-i18n="footer">Research prototype.</p>
+    </footer>
+  </div>
+
+  <dialog class="preview" id="preview-dialog" aria-labelledby="preview-title">
+    <div class="preview__body">
+      <div class="preview__head">
+        <h2 class="panel__title" id="preview-title" data-i18n="previewTitle">Character preview</h2>
+        <button class="icon-btn" type="button" id="preview-close" data-i18n-attr="aria-label:close" aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="preview__content" id="preview-content"></div>
+    </div>
+  </dialog>
+
+  <script type="module" src="src/scripts/app.js"></script>
+</body>
+</html>

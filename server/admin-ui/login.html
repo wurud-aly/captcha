@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Admin sign in</title>
+  <link rel="icon" href="/public/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/src/styles/main.css">
+  <link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body class="adm-login-body">
+  <main class="adm-login">
+    <div class="adm-login__brand">
+      <p class="adm-login__mark" lang="ar" aria-hidden="true">كابتشا</p>
+      <p class="adm-login__app" data-t="appSub">Arabic Hybrid CAPTCHA</p>
+    </div>
+    <form class="panel adm-login__card" id="login-form" novalidate>
+      <h1 class="panel__title" data-t="loginTitle">تسجيل دخول المسؤول</h1>
+      <p class="adm-muted" data-t="loginIntro"></p>
+      <label class="field" for="password">
+        <span data-t="password">كلمة المرور</span>
+        <input class="adm-input" id="password" name="password" type="password" autocomplete="current-password" required maxlength="256" dir="ltr">
+      </label>
+      <button class="btn btn--primary adm-block" type="submit" id="login-btn" data-t="signIn">دخول</button>
+      <p class="status" id="login-status" role="status" aria-live="polite"></p>
+    </form>
+    <div class="adm-login__foot">
+      <a class="adm-link" href="/" data-t="backToSite">العودة إلى الموقع العام</a>
+      <button class="lang-toggle adm-lang" type="button" id="lang" data-t="langSwitch">English</button>
+    </div>
+  </main>
+  <script type="module" src="/admin/static/login.js"></script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "name": "arabic-hybrid-captcha",
+  "version": "0.2.0",
+  "description": "Experimental research prototype that composes Arabic CAPTCHA words from handwritten letter images and Cairo Light typed letters.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "start": "node scripts/serve.mjs --port 8080",
+    "start:pages": "node scripts/serve.mjs --port 8080 --base /arabic-hybrid-captcha/",
+    "admin": "node server/admin-server.mjs",
+    "admin:setup": "node server/setup-admin.mjs",
+    "build:pages": "node scripts/build-pages.mjs _site",
+    "test": "node --test tests/unit/*.test.mjs tests/server/*.test.mjs",
+    "test:e2e": "node tests/e2e/run-e2e.mjs",
+    "test:admin": "node tests/e2e/admin-e2e.mjs",
+    "analyze": "python3 tools/analyze_letters.py"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "playwright": "^1.56.0"
+  }
+}

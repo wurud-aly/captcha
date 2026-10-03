@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stroke calibration</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; color: #1d2430; background: #f6f5f0; }
+  table { border-collapse: collapse; margin: 12px 0 24px; }
+  td, th { border: 1px solid #ccc; padding: 4px 10px; text-align: right; }
+  th { background: #ebe7dc; }
+  pre { background: #fff; padding: 12px; border: 1px solid #ddd; }
+</style>
+</head>
+<body>
+<h1>Stroke thickness &amp; size calibration</h1>
+<p>Open through the local server (<code>npm start</code>, then <code>/tools/calibration.html</code>). It compares every
+identified handwritten sample with the same letter and form typed in Cairo Light, and recommends
+<code>typed.fontSize</code> and <code>typed.thickness</code> for <code>src/data/composition.json</code>.</p>
+<div id="out">Measuring…</div>
+<script type="module">
+import { loadAllData } from '../src/scripts/data-loader.js';
+import { LetterDatabase } from '../src/scripts/letter-database.js';
+import { GlyphFactory } from '../src/scripts/glyph-factory.js';
+import { readInk, estimateStrokeWidth, inkBox } from '../src/scripts/image-processor.js';
+
+const base = new URL('../', document.baseURI).href;
+const data = await loadAllData(base);
+const db = new LetterDatabase(data.letters);
+const t = data.composition.typed;
+const face = new FontFace(t.fontFamily, `url("${new URL(t.fontFile, base).href}")`, { weight: String(t.fontWeight) });
+await face.load(); document.fonts.add(face);
+const factory = new GlyphFactory(data.composition);
+
+const REF = 100; // reference font size
+const rows = [];
+for (const s of db.all()) {
+  const img = new Image(); img.src = new URL(s.file, base).href; await img.decode();
+  const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+  c.getContext('2d').drawImage(img, 0, 0);
+  const ink = readInk(c);
+  const hb = inkBox(ink, c.width, c.height);
+  const row = { id: s.id, char: s.character, form: s.form, status: s.status,
+    handStroke: estimateStrokeWidth(ink, c.width, c.height), handW: hb.w, handH: hb.h };
+  if (db.isUsable(s)) {
+    const p = factory.typed(s.character, s.form, REF, { thickness: 0, inkColor: '#000000' });
+    row.typedStroke100 = p.strokeWidth; row.typedW100 = p.inkBox.w; row.typedH100 = p.inkBox.h;
+    row.sizeByHeight = REF * hb.h / p.inkBox.h;
+    row.sizeByWidth = REF * hb.w / p.inkBox.w;
+  }
+  rows.push(row);
+}
+const usable = rows.filter(r => r.typedStroke100);
+const median = (a) => { const b = [...a].sort((x, y) => x - y); const m = b.length >> 1; return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2; };
+// Match letter HEIGHT: the handwriting is much more horizontally stretched than
+// Cairo (ruqʿa-like flat forms), so widths are not comparable. Flat samples
+// (ink height < 25 px, e.g. a toothless sīn) carry no height information.
+const sizeEstimates = usable.filter(r => r.handH >= 25).map(r => r.sizeByHeight);
+const handStroke = median(rows.map(r => r.handStroke));
+const fontSize = Math.round(median(sizeEstimates));
+const typedStroke100 = median(usable.map(r => r.typedStroke100));
+// thickness needed so typed strokes match the median handwritten stroke
+const typedStrokeAtSize = typedStroke100 * fontSize / REF;
+const measureTyped = (th) => median(usable.map(r => factory.typed(r.char, r.form, fontSize, { thickness: th, inkColor: '#000000' }).strokeWidth));
+// first estimate, then one correction step (outline thinning is not exactly linear)
+let recThickness = handStroke - typedStrokeAtSize;
+recThickness += handStroke - measureTyped(recThickness);
+recThickness = +recThickness.toFixed(2);
+const typedStrokeAfter = measureTyped(recThickness);
+const result = {
+  handwrittenStrokeMedian: +handStroke.toFixed(2),
+  typedStrokeAt100px: +typedStroke100.toFixed(2),
+  recommendedFontSize: fontSize,
+  typedStrokeAtRecommendedSize: +typedStrokeAtSize.toFixed(2),
+  recommendedTypedThickness: recThickness,
+  typedStrokeAfterAdjustment: +typedStrokeAfter.toFixed(2),
+  rows,
+};
+window.__calibration = result;
+
+const fmt = (v) => typeof v === 'number' ? v.toFixed(2) : (v ?? '');
+document.getElementById('out').innerHTML = `
+<table><tr><th>sample</th><th>letter</th><th>form</th><th>hand stroke</th><th>hand w×h</th><th>Cairo stroke @100</th><th>Cairo w×h @100</th><th>size by h</th><th>size by w</th></tr>
+${rows.map(r => `<tr><td>${r.id}</td><td>${r.char ?? 'unknown'}</td><td>${r.form}</td><td>${fmt(r.handStroke)}</td><td>${r.handW}×${r.handH}</td><td>${fmt(r.typedStroke100)}</td><td>${r.typedW100 ?? ''}×${r.typedH100 ?? ''}</td><td>${fmt(r.sizeByHeight)}</td><td>${fmt(r.sizeByWidth)}</td></tr>`).join('')}
+</table>
+<pre>${JSON.stringify({ ...result, rows: undefined }, null, 2)}</pre>`;
+</script>
+</body>
+</html>

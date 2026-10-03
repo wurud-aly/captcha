@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "description": "Global composition and rendering defaults. Units are logical CSS pixels at size 1.0 unless noted. Values were calibrated with tools/calibration.html (see README > Stroke thickness matching).",
+  "canvas": {
+    "width": 640,
+    "height": 220,
+    "padding": 26
+  },
+  "typed": {
+    "fontFamily": "Cairo Light Local",
+    "fontFile": "public/assets/fonts/Cairo-Light.ttf",
+    "fontWeight": 300,
+    "fontSize": 97,
+    "thickness": -2.0,
+    "anchorBand": {
+      "up": 0.2,
+      "down": 0.06
+    },
+    "maxThinning": 0.035,
+    "calibration": {
+      "handwrittenStrokeMedianPx": 2.83,
+      "cairoStrokeAt100pxPx": 4.75,
+      "cairoStrokeAtFontSizePx": 4.61,
+      "typedStrokeAfterAdjustmentPx": 2.9,
+      "method": "tools/calibration.html. Font size = median ratio of handwritten to Cairo letter HEIGHT for matching letter forms. Thickness = vector outline thinning that brings the median typed stroke width to the median handwritten stroke width (orientation-independent estimator, see image-processor.js estimateStrokeWidth)."
+    }
+  },
+  "handwritten": {
+    "scale": 1.0,
+    "thickness": 0,
+    "edgeCrispness": 0.35
+  },
+  "layout": {
+    "size": 1.0,
+    "spacing": 14,
+    "overlap": 2,
+    "baselineMode": "joins",
+    "verticalOffset": 0
+  },
+  "render": {
+    "inkColor": "#1d2430",
+    "background": "paper",
+    "effects": [],
+    "guides": {
+      "baseline": "rgba(214,64,64,0.65)",
+      "handwritten": "#14958a",
+      "typed": "#c98a12",
+      "entry": "#2563eb",
+      "exit": "#c2410c"
+    }
+  }
+}
