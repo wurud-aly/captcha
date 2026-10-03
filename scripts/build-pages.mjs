@@ -1,13 +1,11 @@
 #!/usr/bin/env node
 /**
- * Build the GitHub Pages bundle: ONLY the public CAPTCHA site.
+ * Build the GitHub Pages bundle: only the CAPTCHA page and its assets.
  *
  *   node scripts/build-pages.mjs [outDir]     (default: _site)
  *
  * Included: index.html, .nojekyll, public/, src/
- * Never included: server/ (admin server + dashboard), tests/, tools/, docs,
- * credentials, backups, node_modules. The admin dashboard therefore does not
- * exist on the public site at all.
+ * Never included: tests/, scripts/, .github/, node_modules, README, package files.
  */
 import { cpSync, rmSync, mkdirSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
