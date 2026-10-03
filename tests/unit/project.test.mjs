@@ -1,126 +1,84 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { join, extname, dirname, resolve } from 'node:path';
+import { readFileSync, existsSync, readdirSync, statSync, mkdtempSync, rmSync } from 'node:fs';
+import { join, dirname, resolve, extname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { defaultSettings, clampSetting, createStore, SETTING_SPECS } from '../../src/scripts/settings.js';
+import { buildPages } from '../../scripts/build-pages.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const read = (p) => readFileSync(join(ROOT, p), 'utf8');
 
-const REQUIRED = [
-  'index.html',
-  'README.md',
-  'LICENSE',
-  '.gitignore',
-  'package.json',
-  'public/favicon.svg',
-  'public/assets/fonts/Cairo-Light.ttf',
-  'src/styles/main.css',
-  'src/scripts/app.js',
-  'src/scripts/captcha-engine.js',
-  'src/scripts/arabic-composer.js',
-  'src/scripts/image-processor.js',
-  'src/scripts/letter-database.js',
-  'src/scripts/word-database.js',
-  'src/scripts/settings.js',
-  'src/data/letters.json',
-  'src/data/words.json',
-  'src/data/composition.json',
-];
-
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
-    if (['node_modules', '.git', 'output'].includes(name)) continue;
+    if (['node_modules', '.git', 'output', '_site'].includes(name)) continue;
     const p = join(dir, name);
     if (statSync(p).isDirectory()) walk(p, out);
     else out.push(p);
   }
   return out;
 }
-const sourceFiles = walk(ROOT).filter((p) => ['.html', '.js', '.mjs', '.css', '.json'].includes(extname(p)));
 
-test('all required files exist', () => {
-  for (const f of REQUIRED) assert.ok(existsSync(join(ROOT, f)), f);
+test('required files exist', () => {
+  for (const f of ['index.html', 'src/styles/main.css', 'src/scripts/app.js', 'src/scripts/challenge.js', 'src/scripts/drag-sort.js', 'src/data/words.json', 'public/assets/fonts/Cairo-Light.ttf', 'public/favicon.svg', '.nojekyll'])
+    assert.ok(existsSync(join(ROOT, f)), f);
 });
 
-test('12 handwritten PNG files are present', () => {
-  const files = readdirSync(join(ROOT, 'public/assets/handwritten')).filter((f) => f.endsWith('.png'));
-  assert.equal(files.length, 12);
+test('the old interface, admin dashboard and developer tools are gone', () => {
+  for (const f of ['server', 'tools', 'src/scripts/ui', 'src/scripts/captcha-engine.js', 'src/scripts/settings.js', 'src/data/letters.json', 'public/assets/handwritten'])
+    assert.ok(!existsSync(join(ROOT, f)), `${f} should not exist`);
+  const html = read('index.html');
+  for (const word of ['admin', 'settings', 'gallery', 'experiment', '<nav', '<aside', '<a ', 'debug'])
+    assert.ok(!html.toLowerCase().includes(word), `index.html contains "${word}"`);
 });
 
-test('font file is a TrueType font (Cairo Light)', () => {
-  const b = readFileSync(join(ROOT, 'public/assets/fonts/Cairo-Light.ttf'));
-  assert.equal(b.readUInt32BE(0), 0x00010000);
-  assert.ok(b.includes(Buffer.from('Cairo Light', 'utf16le')) || b.includes(Buffer.from('Cairo-Light')));
+test('the page is Arabic and right-to-left', () => {
+  assert.match(read('index.html'), /<html lang="ar" dir="rtl">/);
 });
 
-test('no machine-specific absolute paths or local URLs in project sources', () => {
-  const bad = /(\/home\/|\/root\/|\/Users\/|[A-Z]:\\\\|file:\/\/)/;
-  for (const p of sourceFiles) {
-    if (p.includes(`${join('tests', 'unit')}`)) continue; // this file contains the patterns
-    assert.ok(!bad.test(readFileSync(p, 'utf8')), `absolute path in ${p}`);
-  }
-});
-
-test('no external font / CDN dependencies in the app', () => {
-  const ext = /(fonts\.googleapis|fonts\.gstatic|cdn\.jsdelivr|unpkg\.com|cdnjs)/;
-  for (const p of ['index.html', 'src/styles/main.css', ...readdirSync(join(ROOT, 'src/scripts')).filter((f) => f.endsWith('.js')).map((f) => `src/scripts/${f}`)]) {
-    assert.ok(!ext.test(read(p)), p);
-  }
-});
-
-test('index.html references only relative paths that exist', () => {
+test('index.html and CSS reference only relative paths that exist', () => {
   const html = read('index.html');
   const refs = [...html.matchAll(/(?:src|href)="([^"#]+)"/g)].map((m) => m[1]);
-  assert.ok(refs.length >= 4);
   for (const r of refs) {
-    assert.ok(!r.startsWith('/') && !/^https?:/.test(r), `non-relative reference ${r}`);
+    assert.ok(!r.startsWith('/') && !/^https?:/.test(r), `non-relative ${r}`);
     assert.ok(existsSync(join(ROOT, r)), `missing ${r}`);
   }
+  for (const m of read('src/styles/main.css').matchAll(/url\('([^']+)'\)/g)) assert.ok(existsSync(resolve(join(ROOT, 'src/styles'), m[1])), m[1]);
+  for (const p of walk(join(ROOT, 'src/scripts')))
+    for (const m of readFileSync(p, 'utf8').matchAll(/from '(\.[^']+)'/g)) assert.ok(existsSync(resolve(dirname(p), m[1])), `${p} -> ${m[1]}`);
 });
 
-test('CSS url() references resolve relative to the stylesheet', () => {
-  const css = read('src/styles/main.css');
-  for (const m of css.matchAll(/url\('([^']+)'\)/g)) {
-    assert.ok(existsSync(resolve(dirname(join(ROOT, 'src/styles/main.css')), m[1])), m[1]);
+test('no external services, CDNs or absolute machine paths', () => {
+  for (const p of walk(ROOT).filter((f) => ['.html', '.js', '.mjs', '.css', '.json'].includes(extname(f)))) {
+    if (p.includes(join('tests', 'unit'))) continue;
+    const text = readFileSync(p, 'utf8');
+    assert.ok(!/(\/home\/|\/root\/|\/Users\/|file:\/\/)/.test(text), `absolute path in ${p}`);
+    if (!p.includes('.github')) assert.ok(!/(googleapis|gstatic|jsdelivr|unpkg|cdnjs)/.test(text), `external dependency in ${p}`);
   }
 });
 
-test('JSON asset paths are relative and exist', () => {
-  const comp = JSON.parse(read('src/data/composition.json'));
-  assert.ok(existsSync(join(ROOT, comp.typed.fontFile)));
-  assert.ok(!comp.typed.fontFile.startsWith('/'));
-  for (const s of JSON.parse(read('src/data/letters.json')).samples) assert.ok(!s.file.startsWith('/'));
+test('the complete word list is never written into the page', () => {
+  const html = read('index.html');
+  for (const w of JSON.parse(read('src/data/words.json')).words) assert.ok(!html.includes(w), w);
 });
 
-test('ES module imports resolve to files', () => {
-  for (const p of sourceFiles.filter((f) => f.includes(join('src', 'scripts')))) {
-    for (const m of readFileSync(p, 'utf8').matchAll(/from '(\.[^']+)'/g)) {
-      assert.ok(existsSync(resolve(dirname(p), m[1])), `${p} -> ${m[1]}`);
-    }
+test('GitHub Pages bundle contains only the CAPTCHA page and its assets', () => {
+  const out = mkdtempSync(join(tmpdir(), 'captcha-pages-'));
+  try {
+    const { files } = buildPages(out);
+    assert.deepEqual(files.sort(), [
+      '.nojekyll',
+      'index.html',
+      'public/assets/fonts/Cairo-Light.ttf',
+      'public/assets/fonts/OFL.txt',
+      'public/favicon.svg',
+      'src/data/words.json',
+      'src/scripts/app.js',
+      'src/scripts/challenge.js',
+      'src/scripts/drag-sort.js',
+      'src/styles/main.css',
+    ]);
+  } finally {
+    rmSync(out, { recursive: true, force: true });
   }
-});
-
-test('settings defaults come from composition.json and are within range', () => {
-  const comp = JSON.parse(read('src/data/composition.json'));
-  const d = defaultSettings(comp);
-  assert.equal(d.typedStroke, comp.typed.thickness);
-  for (const [k, spec] of Object.entries(SETTING_SPECS)) {
-    if (spec.options) assert.ok(spec.options.includes(d[k]), k);
-    else assert.ok(d[k] >= spec.min && d[k] <= spec.max, `${k}=${d[k]}`);
-  }
-});
-
-test('settings clamp and store', () => {
-  assert.equal(clampSetting('overlap', 999), SETTING_SPECS.overlap.max);
-  assert.equal(clampSetting('baselineMode', 'nope'), 'joins');
-  const store = createStore({ a: 1, characters: {} });
-  let calls = 0;
-  store.subscribe(() => calls++);
-  store.set({ a: 2 });
-  store.setCharacter('w', 1, { style: 'typed' });
-  assert.equal(store.get().a, 2);
-  assert.deepEqual(store.get().characters, { w: { 1: { style: 'typed' } } });
-  assert.equal(calls, 2);
 });
